@@ -80,8 +80,8 @@ def _json_value(value: Any, max_rows: int = 100) -> Any:
 class DataTools:
     """Read-only EDA operations over a dataframe.
 
-    ``query`` is for planner-generated expressions; the named methods are a
-    clearer API for application code and tests.
+    ``query`` is a restricted internal expression mechanism; named methods are
+    the primary API for agent planning and tests.
     """
 
     def __init__(self, dataframe: pd.DataFrame | None = None, data_path: str | Path = DEFAULT_DATA_PATH):
@@ -90,6 +90,29 @@ class DataTools:
     @property
     def columns(self) -> list[str]:
         return self.df.columns.tolist()
+
+    def count_rows(self) -> dict[str, int]:
+        return {"row_count": int(len(self.df))}
+
+    def schema_summary(self, max_categories: int = 6) -> str:
+        """One line per column: name, dtype, and (for low-cardinality text
+        columns) the actual category values. This is injected into the
+        planner prompt so the LLM plans against real column names/values
+        instead of guessing plausible-sounding ones (e.g. ``service_type``,
+        ``churned``) that don't exist in the data.
+        """
+        lines = []
+        for column in self.df.columns:
+            series = self.df[column]
+            if not pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+                uniques = series.dropna().unique().tolist()
+                if len(uniques) <= max_categories:
+                    lines.append(f"{column} (text): {uniques}")
+                else:
+                    lines.append(f"{column} (text, {series.nunique()} unique values)")
+            else:
+                lines.append(f"{column} ({series.dtype})")
+        return "; ".join(lines)
 
     def query(self, expression: str) -> Any:
         if not isinstance(expression, str) or not expression.strip():
@@ -112,7 +135,16 @@ class DataTools:
 
     def filter(self, filters: dict[str, Any]) -> dict[str, Any]:
         """Filter exact values, or comparison dicts such as ``{"tenure": {"gte": 12}}``."""
+        return _json_value(self.filtered_frame(filters))
+
+    def filtered_frame(self, filters: dict[str, Any] | None) -> pd.DataFrame:
+        """Same filtering logic as :meth:`filter`, but returns the raw,
+        unbounded dataframe instead of the 100-row JSON view. Used internally
+        by tools (e.g. segment risk scoring) that need every matching row,
+        not just a preview."""
         result = self.df
+        if not filters:
+            return result
         self._require_columns(filters)
         valid_ops = {"eq", "ne", "gt", "gte", "lt", "lte", "in"}
         for column, condition in filters.items():
@@ -127,7 +159,24 @@ class DataTools:
                      "gte": series >= value, "lt": series < value, "lte": series <= value,
                      "in": series.isin(value if isinstance(value, list) else [value])}
             result = result[masks[op]]
-        return _json_value(result)
+        return result
+
+    def customer_features(self, customer_id: str) -> dict[str, Any]:
+        """Return one customer's model features as a tool result.
+
+        This is intentionally separate from prediction so a projection can
+        trace its base feature values to a fact-ledger entry.
+        """
+        if "customerID" not in self.df.columns:
+            raise ValueError("The dataframe has no customerID column")
+        matches = self.df.loc[self.df["customerID"] == customer_id]
+        if matches.empty:
+            raise ValueError(f"Unknown customer_id: {customer_id!r}")
+        if len(matches) > 1:
+            raise ValueError(f"customer_id is not unique: {customer_id!r}")
+        excluded = {"customerID", "Churn"}
+        features = {column: value for column, value in matches.iloc[0].to_dict().items() if column not in excluded}
+        return {"customer_id": customer_id, "features": _json_value(features)}
 
     def groupby_aggregate(self, by: str | list[str], aggregations: dict[str, str | list[str]]) -> dict[str, Any]:
         groups = [by] if isinstance(by, str) else list(by)
@@ -143,8 +192,3 @@ class DataTools:
         unknown = set(columns) - set(self.df.columns)
         if unknown:
             raise ValueError(f"Unknown dataframe column(s): {sorted(unknown)}")
-
-
-def execute_dataframe_query(expression: str, dataframe: pd.DataFrame | None = None) -> Any:
-    """Convenience wrapper used by a tool-calling executor."""
-    return DataTools(dataframe=dataframe).query(expression)

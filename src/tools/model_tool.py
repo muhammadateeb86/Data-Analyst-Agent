@@ -29,7 +29,3 @@ def batch_predict_churn_risk(records: Iterable[dict[str, Any]]) -> list[dict[str
         except (ValueError, TypeError) as exc:
             results.append({"index": index, "error": str(exc)})
     return results
-
-
-# Friendly alias for callers that prefer a verb-first name.
-predict_churn_risk_batch = batch_predict_churn_risk

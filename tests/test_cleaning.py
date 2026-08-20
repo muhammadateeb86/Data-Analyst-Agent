@@ -1,5 +1,4 @@
 import pandas as pd
-import pytest
 
 from src.model.cleaning import load_and_clean_data, get_feature_target_split, TARGET_COLUMN
 

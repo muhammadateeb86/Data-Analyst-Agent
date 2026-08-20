@@ -114,6 +114,27 @@ def _compute_top_factors(pipeline, row: pd.DataFrame, top_n: int = 5) -> list[di
     return factors
 
 
+def predict_risk_scores(frame: pd.DataFrame) -> np.ndarray:
+    """Vectorized risk scores for a whole slice of the reference dataframe.
+
+    Used for aggregate/segment questions ("average predicted risk by
+    Contract") so the agent never has to enumerate customer IDs and call
+    ``predict_churn_risk`` once per row. Drops ``customerID``/``Churn`` if
+    present, then requires the remaining columns to match the trained
+    feature schema exactly (same guarantee as the single-row path).
+    """
+    if frame.empty:
+        return np.array([])
+    artifact = _load_artifact()
+    pipeline = artifact["pipeline"]
+    feature_columns = artifact["feature_columns"]
+    working = frame.drop(columns=[c for c in ("customerID", "Churn") if c in frame.columns])
+    missing = [c for c in feature_columns if c not in working.columns]
+    if missing:
+        raise PredictionInputError(f"Missing required feature(s) for scoring: {missing}")
+    return pipeline.predict_proba(working[feature_columns])[:, 1]
+
+
 def predict_churn_risk(customer_id: str | None = None, features: dict | None = None) -> dict:
     if (customer_id is None) == (features is None):
         raise PredictionInputError(
